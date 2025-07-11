@@ -12,7 +12,6 @@ export class ResumeBotFrontendStack extends cdk.Stack {
 
     // S3 bucket for hosting static files (not configured as website)
     const websiteBucket = new s3.Bucket(this, 'ResumeBotWebsiteBucket', {
-      bucketName: `resume-bot-frontend-${this.account}-${this.region}`,
       publicReadAccess: false, // Private bucket, access via CloudFront only
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY, // For development - change to RETAIN for production
@@ -24,8 +23,8 @@ export class ResumeBotFrontendStack extends cdk.Stack {
       comment: 'Resume Bot Frontend OAI',
     });
 
-    // Grant the OAI read access to the bucket
-    websiteBucket.grantRead(originAccessIdentity);
+    // Note: We don't need to explicitly grant read access here
+    // The S3Origin construct will handle the bucket policy automatically
 
     // CloudFront distribution using L2 construct with OAI
     const distribution = new cloudfront.Distribution(this, 'ResumeBotDistribution', {

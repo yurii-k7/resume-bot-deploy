@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Resume Bot Frontend Deployment Script
+# Resume Bot Full Stack Deployment Script
 set -e
 
-echo "🚀 Starting Resume Bot Frontend Deployment..."
+echo "🚀 Starting Resume Bot Full Stack Deployment..."
 
 # Colors for output
 RED='\033[0;31m'
@@ -77,9 +77,15 @@ npm run build
 print_status "Bootstrapping CDK (if needed)..."
 npx cdk bootstrap
 
-# Deploy the stack
-print_status "Deploying CDK stack..."
-npx cdk deploy --require-approval never
+# Deploy the stacks
+print_status "Deploying CDK stacks..."
+print_status "Deploying backend stack first..."
+npx cdk deploy ResumeBotBackendStack --require-approval never
+
+print_status "Deploying frontend stack..."
+npx cdk deploy ResumeBotFrontendStack --require-approval never
 
 print_status "🎉 Deployment completed successfully!"
-print_warning "Check the CloudFormation outputs for your website URL"
+print_warning "Check the CloudFormation outputs for:"
+print_warning "- Backend API endpoint URL"
+print_warning "- Frontend website URL"
