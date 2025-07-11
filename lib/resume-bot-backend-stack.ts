@@ -8,6 +8,8 @@ import { Construct } from 'constructs';
 import * as path from 'path';
 
 export class ResumeBotBackendStack extends cdk.Stack {
+  public readonly apiEndpoint: string;
+
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
@@ -114,6 +116,9 @@ export class ResumeBotBackendStack extends cdk.Stack {
     // Allow ALB to access ECS service
     service.connections.allowFrom(alb, ec2.Port.tcp(8081));
 
+    // Set the API endpoint for cross-stack reference
+    this.apiEndpoint = `http://${alb.loadBalancerDnsName}`;
+
     // Outputs
     new cdk.CfnOutput(this, 'LoadBalancerDNS', {
       value: alb.loadBalancerDnsName,
@@ -121,7 +126,7 @@ export class ResumeBotBackendStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'APIEndpoint', {
-      value: `http://${alb.loadBalancerDnsName}`,
+      value: this.apiEndpoint,
       description: 'Resume Bot Backend API endpoint',
     });
 

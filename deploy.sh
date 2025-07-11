@@ -45,30 +45,6 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
-# Build the frontend
-print_status "Building the frontend..."
-cd ../resume-bot-frontend
-
-# Check if frontend dependencies are installed
-if [ ! -d "node_modules" ]; then
-    print_status "Installing frontend dependencies..."
-    npm install
-fi
-
-# Build the frontend
-npm run build
-
-# Check if build was successful
-if [ ! -d "dist" ]; then
-    print_error "Frontend build failed - dist directory not found"
-    exit 1
-fi
-
-print_status "Frontend build completed successfully"
-
-# Go back to CDK directory
-cd ../resume-bot-deploy
-
 # Build CDK TypeScript
 print_status "Building CDK TypeScript..."
 npm run build
@@ -77,11 +53,46 @@ npm run build
 print_status "Bootstrapping CDK (if needed)..."
 npx cdk bootstrap
 
-# Deploy the stacks
-print_status "Deploying CDK stacks..."
+# Deploy the backend stack first
 print_status "Deploying backend stack first..."
 npx cdk deploy ResumeBotBackendStack --require-approval never
 
+# Get the backend API URL from the CloudFormation outputs
+print_status "Getting backend API URL..."
+API_URL=$(aws cloudformation describe-stacks --stack-name ResumeBotBackendStack --query 'Stacks[0].Outputs[?OutputKey==`APIEndpoint`].OutputValue' --output text)
+
+if [ -z "$API_URL" ]; then
+    print_error "Failed to get backend API URL from CloudFormation outputs"
+    exit 1
+fi
+
+print_status "Backend API URL: $API_URL"
+
+# Build the frontend with the correct API URL
+print_status "Building the frontend with backend API URL..."
+cd ../resume-bot-frontend
+
+# Check if frontend dependencies are installed
+if [ ! -d "node_modules" ]; then
+    print_status "Installing frontend dependencies..."
+    npm install
+fi
+
+# Build the frontend with the API URL
+VITE_API_URL=$API_URL npm run build
+
+# Check if build was successful
+if [ ! -d "dist" ]; then
+    print_error "Frontend build failed - dist directory not found"
+    exit 1
+fi
+
+print_status "Frontend build completed successfully with API URL: $API_URL"
+
+# Go back to CDK directory
+cd ../resume-bot-deploy
+
+# Deploy the frontend stack
 print_status "Deploying frontend stack..."
 npx cdk deploy ResumeBotFrontendStack --require-approval never
 
