@@ -5,14 +5,42 @@ import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import * as fs from 'fs';
 
 export class ResumeBotBackendStack extends cdk.Stack {
   public readonly apiEndpoint: string;
 
+  private loadEnvFile(): Record<string, string> {
+    const envPath = path.join(__dirname, '../../resume-bot-backend/.env');
+    
+    if (!fs.existsSync(envPath)) {
+      throw new Error(`Environment file not found at ${envPath}`);
+    }
+
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    const envVars: Record<string, string> = {};
+
+    envContent.split('\n').forEach(line => {
+      line = line.trim();
+      if (line && !line.startsWith('#')) {
+        const [key, ...valueParts] = line.split('=');
+        if (key && valueParts.length > 0) {
+          envVars[key.trim()] = valueParts.join('=').trim();
+        }
+      }
+    });
+
+    return envVars;
+  }
+
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+
+    // Load environment variables from .env file
+    const envVars = this.loadEnvFile();
 
     // Create VPC
     const vpc = new ec2.Vpc(this, 'ResumeBotVPC', {
@@ -45,11 +73,40 @@ export class ResumeBotBackendStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // Validate that required environment variables are present
+    const requiredEnvVars = ['OPENAI_API_KEY', 'PINECONE_API_KEY', 'LANGSMITH_API_KEY'];
+    for (const envVar of requiredEnvVars) {
+      if (!envVars[envVar]) {
+        throw new Error(`Required environment variable ${envVar} not found in .env file`);
+      }
+    }
+
+    // Create secrets for sensitive environment variables using actual values from .env
+    const openaiApiKeySecret = new secretsmanager.Secret(this, 'OpenAIApiKeySecret', {
+      description: 'OpenAI API Key for Resume Bot',
+      secretStringValue: cdk.SecretValue.unsafePlainText(envVars.OPENAI_API_KEY),
+    });
+
+    const pineconeApiKeySecret = new secretsmanager.Secret(this, 'PineconeApiKeySecret', {
+      description: 'Pinecone API Key for Resume Bot',
+      secretStringValue: cdk.SecretValue.unsafePlainText(envVars.PINECONE_API_KEY),
+    });
+
+    const langsmithApiKeySecret = new secretsmanager.Secret(this, 'LangsmithApiKeySecret', {
+      description: 'LangSmith API Key for Resume Bot',
+      secretStringValue: cdk.SecretValue.unsafePlainText(envVars.LANGSMITH_API_KEY),
+    });
+
     // Create Task Definition
     const taskDefinition = new ecs.FargateTaskDefinition(this, 'ResumeBotTaskDefinition', {
       memoryLimitMiB: 512,
       cpu: 256,
     });
+
+    // Grant task role permission to read secrets
+    openaiApiKeySecret.grantRead(taskDefinition.taskRole);
+    pineconeApiKeySecret.grantRead(taskDefinition.taskRole);
+    langsmithApiKeySecret.grantRead(taskDefinition.taskRole);
 
     // Add container to task definition
     const container = taskDefinition.addContainer('resume-bot-container', {
@@ -59,7 +116,18 @@ export class ResumeBotBackendStack extends cdk.Stack {
         logGroup: logGroup,
       }),
       environment: {
+        // Non-sensitive environment variables
         FLASK_ENV: 'production',
+        INDEX_NAME: envVars.INDEX_NAME || 'medium-blogs-embeddings-index',
+        LANGSMITH_TRACING: envVars.LANGSMITH_TRACING || 'true',
+        LANGSMITH_ENDPOINT: envVars.LANGSMITH_ENDPOINT || 'https://api.smith.langchain.com',
+        LANGCHAIN_PROJECT: envVars.LANGCHAIN_PROJECT || 'Medium Analyzer',
+      },
+      secrets: {
+        // Sensitive environment variables from AWS Secrets Manager
+        OPENAI_API_KEY: ecs.Secret.fromSecretsManager(openaiApiKeySecret),
+        PINECONE_API_KEY: ecs.Secret.fromSecretsManager(pineconeApiKeySecret),
+        LANGSMITH_API_KEY: ecs.Secret.fromSecretsManager(langsmithApiKeySecret),
       },
     });
 
@@ -169,5 +237,6 @@ export class ResumeBotBackendStack extends cdk.Stack {
       value: service.serviceName,
       description: 'ECS Service name',
     });
+
   }
 }
