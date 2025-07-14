@@ -4,6 +4,7 @@ import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import { Construct } from 'constructs';
 import * as path from 'path';
 
@@ -91,8 +92,8 @@ export class ResumeBotBackendStack extends cdk.Stack {
       },
     });
 
-    // Create Listener
-    const listener = alb.addListener('ResumeBotListener', {
+    // Create HTTP listener for primary access
+    const listener = alb.addListener('ResumeBotHttpListener', {
       port: 80,
       protocol: elbv2.ApplicationProtocol.HTTP,
       defaultTargetGroups: [targetGroup],
@@ -116,8 +117,42 @@ export class ResumeBotBackendStack extends cdk.Stack {
     // Allow ALB to access ECS service
     service.connections.allowFrom(alb, ec2.Port.tcp(8081));
 
-    // Set the API endpoint for cross-stack reference
-    this.apiEndpoint = `http://${alb.loadBalancerDnsName}`;
+    // Create API Gateway to proxy requests to ALB over HTTPS
+    const api = new apigateway.RestApi(this, 'ResumeBotApi', {
+      restApiName: 'Resume Bot API',
+      description: 'API Gateway proxy for Resume Bot backend',
+      endpointConfiguration: {
+        types: [apigateway.EndpointType.REGIONAL],
+      },
+    });
+
+    // Create integration with ALB
+    const integration = new apigateway.HttpIntegration(`http://${alb.loadBalancerDnsName}/{proxy}`, {
+      httpMethod: 'ANY',
+      options: {
+        requestParameters: {
+          'integration.request.path.proxy': 'method.request.path.proxy',
+        },
+      },
+    });
+
+    // Add proxy resource to handle all requests
+    const proxyResource = api.root.addResource('{proxy+}');
+    proxyResource.addMethod('ANY', integration, {
+      requestParameters: {
+        'method.request.path.proxy': true,
+      },
+    });
+
+    // Add CORS support for the API
+    proxyResource.addCorsPreflight({
+      allowOrigins: ['*'],
+      allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowHeaders: ['Content-Type', 'Authorization'],
+    });
+
+    // Set the API endpoint to use API Gateway URL (which provides HTTPS)
+    this.apiEndpoint = api.url;
 
     // Outputs
     new cdk.CfnOutput(this, 'LoadBalancerDNS', {
@@ -127,7 +162,7 @@ export class ResumeBotBackendStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'APIEndpoint', {
       value: this.apiEndpoint,
-      description: 'Resume Bot Backend API endpoint',
+      description: 'Resume Bot Backend API endpoint (via API Gateway)',
     });
 
     new cdk.CfnOutput(this, 'ServiceName', {
