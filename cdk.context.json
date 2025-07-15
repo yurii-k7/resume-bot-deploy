@@ -1,6 +1,7 @@
 {
   "acknowledged-issue-numbers": [
-    32775
+    32775,
+    34892
   ],
   "availability-zones:account=058264535337:region=ca-central-1": [
     "ca-central-1a",
