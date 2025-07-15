@@ -3,9 +3,9 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import * as iam from 'aws-cdk-lib/aws-iam';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -222,6 +222,125 @@ export class ResumeBotBackendStack extends cdk.Stack {
     // Set the API endpoint to use API Gateway URL (which provides HTTPS)
     this.apiEndpoint = api.url;
 
+    // Create CloudWatch Dashboard for monitoring
+    const dashboard = new cloudwatch.Dashboard(this, 'ResumeBotDashboard', {
+      dashboardName: 'ResumeBot-Monitoring',
+    });
+
+    // Add widgets to the dashboard
+    dashboard.addWidgets(
+      // API Gateway metrics
+      new cloudwatch.GraphWidget({
+        title: 'API Gateway - Request Count',
+        left: [api.metricCount()],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'API Gateway - Latency',
+        left: [api.metricLatency()],
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    dashboard.addWidgets(
+      // ECS Service metrics
+      new cloudwatch.GraphWidget({
+        title: 'ECS Service - CPU Utilization',
+        left: [service.metricCpuUtilization()],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'ECS Service - Memory Utilization',
+        left: [service.metricMemoryUtilization()],
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    // Custom log-based metrics for chatbot interactions
+    const chatbotInteractionMetric = new cloudwatch.Metric({
+      namespace: 'ResumeBot/Interactions',
+      metricName: 'ChatbotQuestions',
+      dimensionsMap: {
+        'Service': 'resume-bot-backend'
+      },
+      statistic: 'Sum',
+    });
+
+    const responseTimeMetric = new cloudwatch.Metric({
+      namespace: 'ResumeBot/Performance',
+      metricName: 'ResponseTime',
+      dimensionsMap: {
+        'Service': 'resume-bot-backend'
+      },
+      statistic: 'Average',
+    });
+
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Chatbot Interactions Count',
+        left: [chatbotInteractionMetric],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Average Response Time',
+        left: [responseTimeMetric],
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    // Create CloudWatch Log Insights queries for detailed analysis
+    const logInsightsQueries = [
+      {
+        name: 'Top Questions Asked',
+        query: `
+          fields @timestamp, question
+          | filter @message like /CHATBOT_INTERACTION/
+          | stats count() by question
+          | sort count desc
+          | limit 20
+        `
+      },
+      {
+        name: 'Response Times Over Time',
+        query: `
+          fields @timestamp, response_time_ms
+          | filter @message like /CHATBOT_INTERACTION/
+          | sort @timestamp desc
+          | limit 100
+        `
+      },
+      {
+        name: 'Error Analysis',
+        query: `
+          fields @timestamp, error, question
+          | filter success = false
+          | sort @timestamp desc
+          | limit 50
+        `
+      }
+    ];
+
+    // Create CloudWatch Alarms
+    const highErrorRateAlarm = new cloudwatch.Alarm(this, 'HighErrorRateAlarm', {
+      metric: api.metricClientError(),
+      threshold: 10,
+      evaluationPeriods: 2,
+      alarmDescription: 'High error rate on Resume Bot API',
+    });
+
+    const highLatencyAlarm = new cloudwatch.Alarm(this, 'HighLatencyAlarm', {
+      metric: api.metricLatency(),
+      threshold: 5000, // 5 seconds
+      evaluationPeriods: 2,
+      alarmDescription: 'High latency on Resume Bot API',
+    });
+
     // Outputs
     new cdk.CfnOutput(this, 'LoadBalancerDNS', {
       value: alb.loadBalancerDnsName,
@@ -236,6 +355,16 @@ export class ResumeBotBackendStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ServiceName', {
       value: service.serviceName,
       description: 'ECS Service name',
+    });
+
+    new cdk.CfnOutput(this, 'DashboardURL', {
+      value: `https://${this.region}.console.aws.amazon.com/cloudwatch/home?region=${this.region}#dashboards:name=${dashboard.dashboardName}`,
+      description: 'CloudWatch Dashboard URL for monitoring',
+    });
+
+    new cdk.CfnOutput(this, 'LogGroupName', {
+      value: logGroup.logGroupName,
+      description: 'CloudWatch Log Group for application logs',
     });
 
   }
