@@ -30,6 +30,15 @@ if [ ! -f "package.json" ]; then
     exit 1
 fi
 
+# Load environment variables from .env file
+print_status "Loading environment variables from .env file..."
+if [ -f ".env" ]; then
+    export $(grep -v '^#' .env | xargs)
+    print_status "Environment variables loaded"
+else
+    print_warning ".env file not found"
+fi
+
 # Check if AWS CLI is configured
 if ! aws sts get-caller-identity > /dev/null 2>&1; then
     print_error "AWS CLI is not configured or credentials are invalid"
@@ -53,8 +62,27 @@ npm run build
 print_status "Bootstrapping CDK (if needed)..."
 npx cdk bootstrap
 
-# Deploy the backend stack first
-print_status "Deploying backend stack first..."
+# Bootstrap us-east-1 for certificate stack
+print_status "Bootstrapping us-east-1 for certificate stack..."
+npx cdk bootstrap aws://${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}/us-east-1
+
+# Deploy the certificate stack first (must be in us-east-1 for CloudFront)
+print_status "Deploying certificate stack to us-east-1..."
+npx cdk deploy ResumeBotCertificateStack --require-approval never
+
+# Get the certificate ARN from the certificate stack
+print_status "Getting certificate ARN..."
+CERT_ARN=$(aws cloudformation describe-stacks --stack-name ResumeBotCertificateStack --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`CertificateArn`].OutputValue' --output text)
+
+if [ -z "$CERT_ARN" ]; then
+    print_error "Failed to get certificate ARN from CloudFormation outputs"
+    exit 1
+fi
+
+print_status "Certificate ARN: $CERT_ARN"
+
+# Deploy the backend stack
+print_status "Deploying backend stack..."
 npx cdk deploy ResumeBotBackendStack --require-approval never
 
 # Get the backend API URL from the CloudFormation outputs
@@ -92,9 +120,9 @@ print_status "Frontend build completed successfully with API URL: $API_URL"
 # Go back to CDK directory
 cd ../resume-bot-deploy
 
-# Deploy the frontend stack
-print_status "Deploying frontend stack..."
-npx cdk deploy ResumeBotFrontendStack --require-approval never
+# Deploy the frontend stack with certificate ARN
+print_status "Deploying frontend stack with certificate ARN..."
+npx cdk deploy ResumeBotFrontendStack --parameters CertificateArnParam="$CERT_ARN" --require-approval never
 
 print_status "🎉 Deployment completed successfully!"
 print_warning "Check the CloudFormation outputs for:"

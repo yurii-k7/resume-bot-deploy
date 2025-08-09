@@ -14,7 +14,7 @@ export class ResumeBotBackendStack extends cdk.Stack {
   public readonly apiEndpoint: string;
 
   private loadEnvFile(): Record<string, string> {
-    const envPath = path.join(__dirname, '../../resume-bot-backend/.env');
+    const envPath = path.join(__dirname, '../.env');
     
     if (!fs.existsSync(envPath)) {
       throw new Error(`Environment file not found at ${envPath}`);

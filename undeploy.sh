@@ -5,12 +5,45 @@ set -e
 
 echo "🗑️  Destroying Resume Bot stacks..."
 
-# Destroy frontend stack first (dependent on backend)
-echo "Destroying frontend stack..."
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_status() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Check if we're in the right directory
+if [ ! -f "package.json" ]; then
+    print_error "Please run this script from the resume-bot-deploy directory"
+    exit 1
+fi
+
+# Build CDK TypeScript (needed for destroy)
+print_status "Building CDK TypeScript..."
+npm run build
+
+# Destroy stacks in reverse order of deployment
+print_status "Destroying frontend stack..."
 npx cdk destroy ResumeBotFrontendStack --force
 
-# Destroy backend stack
-echo "Destroying backend stack..."
+print_status "Destroying backend stack..."
 npx cdk destroy ResumeBotBackendStack --force
 
-echo "✅ All stacks destroyed successfully!"
+# Destroy certificate stack last (in us-east-1)
+print_status "Destroying certificate stack from us-east-1..."
+npx cdk destroy ResumeBotCertificateStack --force
+
+print_status "🎉 All stacks destroyed successfully!"
+print_warning "Note: S3 buckets may have been retained if they contained files"
