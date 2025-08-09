@@ -6,6 +6,9 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as certificatemanager from 'aws-cdk-lib/aws-certificatemanager';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -185,6 +188,24 @@ export class ResumeBotBackendStack extends cdk.Stack {
     // Allow ALB to access ECS service
     service.connections.allowFrom(alb, ec2.Port.tcp(8081));
 
+    // Domain configuration for backend API
+    const hostedZoneName = process.env.DOMAIN_NAME;
+    if (!hostedZoneName) {
+      throw new Error('DOMAIN_NAME environment variable is required but not set');
+    }
+    const apiDomainName = `api.${hostedZoneName}`;
+
+    // Import existing hosted zone
+    const hostedZone = route53.HostedZone.fromLookup(this, 'HostedZone', {
+      domainName: hostedZoneName,
+    });
+
+    // Create SSL certificate for API subdomain
+    const apiCertificate = new certificatemanager.Certificate(this, 'ApiCertificate', {
+      domainName: apiDomainName,
+      validation: certificatemanager.CertificateValidation.fromDns(hostedZone),
+    });
+
     // Create API Gateway to proxy requests to ALB over HTTPS
     const api = new apigateway.RestApi(this, 'ResumeBotApi', {
       restApiName: 'Resume Bot API',
@@ -219,8 +240,30 @@ export class ResumeBotBackendStack extends cdk.Stack {
       allowHeaders: ['Content-Type', 'Authorization'],
     });
 
-    // Set the API endpoint to use API Gateway URL (which provides HTTPS)
-    this.apiEndpoint = api.url;
+    // Create custom domain name for API Gateway
+    const apiDomain = new apigateway.DomainName(this, 'ApiDomainName', {
+      domainName: apiDomainName,
+      certificate: apiCertificate,
+      endpointType: apigateway.EndpointType.REGIONAL,
+    });
+
+    // Create base path mapping to connect the custom domain to the API
+    new apigateway.BasePathMapping(this, 'BasePathMapping', {
+      domainName: apiDomain,
+      restApi: api,
+    });
+
+    // Create Route53 A record pointing to the API Gateway custom domain
+    new route53.ARecord(this, 'ApiAliasRecord', {
+      recordName: apiDomainName,
+      target: route53.RecordTarget.fromAlias(
+        new route53targets.ApiGatewayDomain(apiDomain)
+      ),
+      zone: hostedZone,
+    });
+
+    // Set the API endpoint to use the custom domain (which provides HTTPS)
+    this.apiEndpoint = `https://${apiDomainName}`;
 
     // Create CloudWatch Dashboard for monitoring
     const dashboard = new cloudwatch.Dashboard(this, 'ResumeBotDashboard', {
@@ -349,7 +392,12 @@ export class ResumeBotBackendStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'APIEndpoint', {
       value: this.apiEndpoint,
-      description: 'Resume Bot Backend API endpoint (via API Gateway)',
+      description: 'Resume Bot Backend API endpoint (via custom domain)',
+    });
+
+    new cdk.CfnOutput(this, 'CustomApiDomain', {
+      value: apiDomainName,
+      description: 'Custom domain name for the API',
     });
 
     new cdk.CfnOutput(this, 'ServiceName', {

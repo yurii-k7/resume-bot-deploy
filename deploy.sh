@@ -85,15 +85,15 @@ print_status "Certificate ARN: $CERT_ARN"
 print_status "Deploying backend stack..."
 npx cdk deploy ResumeBotBackendStack --require-approval never
 
-# Get the backend API URL from the CloudFormation outputs
-print_status "Getting backend API URL..."
-API_URL=$(aws cloudformation describe-stacks --stack-name ResumeBotBackendStack --query 'Stacks[0].Outputs[?OutputKey==`APIEndpoint`].OutputValue' --output text)
-
-if [ -z "$API_URL" ]; then
-    print_error "Failed to get backend API URL from CloudFormation outputs"
+# Construct the backend API URL using the static pattern
+print_status "Constructing backend API URL..."
+if [ -z "$DOMAIN_NAME" ]; then
+    print_error "DOMAIN_NAME environment variable is not set"
+    print_warning "Please set DOMAIN_NAME in your .env file"
     exit 1
 fi
 
+API_URL="https://api.$DOMAIN_NAME"
 print_status "Backend API URL: $API_URL"
 
 # Build the frontend with the correct API URL
