@@ -193,7 +193,7 @@ export class ResumeBotBackendStack extends cdk.Stack {
     if (!hostedZoneName) {
       throw new Error('DOMAIN_NAME environment variable is required but not set');
     }
-    const apiDomainName = `api.${hostedZoneName}`;
+    const apiDomainName = `api.resume.${hostedZoneName}`;
 
     // Import existing hosted zone
     const hostedZone = route53.HostedZone.fromLookup(this, 'HostedZone', {

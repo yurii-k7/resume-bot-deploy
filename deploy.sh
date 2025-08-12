@@ -93,7 +93,7 @@ if [ -z "$DOMAIN_NAME" ]; then
     exit 1
 fi
 
-API_URL="https://api.$DOMAIN_NAME"
+API_URL="https://api.resume.$DOMAIN_NAME"
 print_status "Backend API URL: $API_URL"
 
 # Build the frontend with the correct API URL
