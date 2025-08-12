@@ -81,8 +81,9 @@ fi
 
 print_status "Certificate ARN: $CERT_ARN"
 
-# Deploy the backend stack
-print_status "Deploying backend stack..."
+# Deploy the backend stack (Lambda-based)
+print_status "Deploying Lambda backend stack..."
+print_status "Building Docker image for Lambda..."
 npx cdk deploy ResumeBotBackendStack --require-approval never
 
 # Construct the backend API URL using the static pattern

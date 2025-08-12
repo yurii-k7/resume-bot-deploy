@@ -1,14 +1,13 @@
 import * as cdk from 'aws-cdk-lib';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as ecs from 'aws-cdk-lib/aws-ecs';
-import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
-import * as logs from 'aws-cdk-lib/aws-logs';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as certificatemanager from 'aws-cdk-lib/aws-certificatemanager';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -45,37 +44,6 @@ export class ResumeBotBackendStack extends cdk.Stack {
     // Load environment variables from .env file
     const envVars = this.loadEnvFile();
 
-    // Create VPC
-    const vpc = new ec2.Vpc(this, 'ResumeBotVPC', {
-      maxAzs: 2,
-      natGateways: 1,
-      subnetConfiguration: [
-        {
-          cidrMask: 24,
-          name: 'public-subnet',
-          subnetType: ec2.SubnetType.PUBLIC,
-        },
-        {
-          cidrMask: 24,
-          name: 'private-subnet',
-          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
-        },
-      ],
-    });
-
-    // Create ECS Cluster
-    const cluster = new ecs.Cluster(this, 'ResumeBotCluster', {
-      vpc,
-      clusterName: 'resume-bot-cluster',
-    });
-
-    // Create CloudWatch Log Group
-    const logGroup = new logs.LogGroup(this, 'ResumeBotLogGroup', {
-      logGroupName: '/aws/ecs/resume-bot-backend',
-      retention: logs.RetentionDays.ONE_WEEK,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-
     // Validate that required environment variables are present
     const requiredEnvVars = ['OPENAI_API_KEY', 'PINECONE_API_KEY', 'LANGSMITH_API_KEY'];
     for (const envVar of requiredEnvVars) {
@@ -100,24 +68,21 @@ export class ResumeBotBackendStack extends cdk.Stack {
       secretStringValue: cdk.SecretValue.unsafePlainText(envVars.LANGSMITH_API_KEY),
     });
 
-    // Create Task Definition
-    const taskDefinition = new ecs.FargateTaskDefinition(this, 'ResumeBotTaskDefinition', {
-      memoryLimitMiB: 512,
-      cpu: 256,
+    // Create CloudWatch Log Group for Lambda
+    const logGroup = new logs.LogGroup(this, 'ResumeBotLogGroup', {
+      logGroupName: '/aws/lambda/resume-bot-backend',
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // Grant task role permission to read secrets
-    openaiApiKeySecret.grantRead(taskDefinition.taskRole);
-    pineconeApiKeySecret.grantRead(taskDefinition.taskRole);
-    langsmithApiKeySecret.grantRead(taskDefinition.taskRole);
-
-    // Add container to task definition
-    const container = taskDefinition.addContainer('resume-bot-container', {
-      image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../resume-bot-backend')),
-      logging: ecs.LogDrivers.awsLogs({
-        streamPrefix: 'resume-bot-backend',
-        logGroup: logGroup,
+    // Create Lambda function using Docker container
+    const lambdaFunction = new lambda.DockerImageFunction(this, 'ResumeBotLambdaFunction', {
+      code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '../../resume-bot-backend'), {
+        file: 'Dockerfile.lambda',
       }),
+      functionName: 'resume-bot-backend',
+      timeout: cdk.Duration.minutes(15), // Max timeout for Lambda
+      memorySize: 3008, // Max memory for better performance with large dependencies
       environment: {
         // Non-sensitive environment variables
         FLASK_ENV: 'production',
@@ -125,68 +90,20 @@ export class ResumeBotBackendStack extends cdk.Stack {
         LANGSMITH_TRACING: envVars.LANGSMITH_TRACING || 'true',
         LANGSMITH_ENDPOINT: envVars.LANGSMITH_ENDPOINT || 'https://api.smith.langchain.com',
         LANGCHAIN_PROJECT: envVars.LANGCHAIN_PROJECT || 'Medium Analyzer',
-      },
-      secrets: {
-        // Sensitive environment variables from AWS Secrets Manager
-        OPENAI_API_KEY: ecs.Secret.fromSecretsManager(openaiApiKeySecret),
-        PINECONE_API_KEY: ecs.Secret.fromSecretsManager(pineconeApiKeySecret),
-        LANGSMITH_API_KEY: ecs.Secret.fromSecretsManager(langsmithApiKeySecret),
+        // Lambda-specific environment variables
+        PYTHONPATH: '/var/task/src',
       },
     });
 
-    // Add port mapping
-    container.addPortMappings({
-      containerPort: 8081,
-      protocol: ecs.Protocol.TCP,
-    });
+    // Grant Lambda permissions to read secrets
+    openaiApiKeySecret.grantRead(lambdaFunction);
+    pineconeApiKeySecret.grantRead(lambdaFunction);
+    langsmithApiKeySecret.grantRead(lambdaFunction);
 
-    // Create Application Load Balancer
-    const alb = new elbv2.ApplicationLoadBalancer(this, 'ResumeBotALB', {
-      vpc,
-      internetFacing: true,
-      loadBalancerName: 'resume-bot-alb',
-    });
-
-    // Create Target Group
-    const targetGroup = new elbv2.ApplicationTargetGroup(this, 'ResumeBotTargetGroup', {
-      port: 8081,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      vpc,
-      targetType: elbv2.TargetType.IP,
-      healthCheck: {
-        path: '/',
-        healthyHttpCodes: '200',
-        interval: cdk.Duration.seconds(30),
-        timeout: cdk.Duration.seconds(5),
-        healthyThresholdCount: 2,
-        unhealthyThresholdCount: 3,
-      },
-    });
-
-    // Create HTTP listener for primary access
-    const listener = alb.addListener('ResumeBotHttpListener', {
-      port: 80,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      defaultTargetGroups: [targetGroup],
-    });
-
-    // Create ECS Service
-    const service = new ecs.FargateService(this, 'ResumeBotService', {
-      cluster,
-      taskDefinition,
-      serviceName: 'resume-bot-service',
-      desiredCount: 1,
-      assignPublicIp: false,
-      vpcSubnets: {
-        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
-      },
-    });
-
-    // Attach service to target group
-    service.attachToApplicationTargetGroup(targetGroup);
-
-    // Allow ALB to access ECS service
-    service.connections.allowFrom(alb, ec2.Port.tcp(8081));
+    // Add environment variables for secret ARNs (Lambda will resolve these at runtime)
+    lambdaFunction.addEnvironment('OPENAI_API_KEY_SECRET_ARN', openaiApiKeySecret.secretArn);
+    lambdaFunction.addEnvironment('PINECONE_API_KEY_SECRET_ARN', pineconeApiKeySecret.secretArn);
+    lambdaFunction.addEnvironment('LANGSMITH_API_KEY_SECRET_ARN', langsmithApiKeySecret.secretArn);
 
     // Domain configuration for backend API
     const hostedZoneName = process.env.DOMAIN_NAME;
@@ -206,39 +123,44 @@ export class ResumeBotBackendStack extends cdk.Stack {
       validation: certificatemanager.CertificateValidation.fromDns(hostedZone),
     });
 
-    // Create API Gateway to proxy requests to ALB over HTTPS
+    // Create API Gateway
     const api = new apigateway.RestApi(this, 'ResumeBotApi', {
       restApiName: 'Resume Bot API',
-      description: 'API Gateway proxy for Resume Bot backend',
+      description: 'API Gateway for Resume Bot Lambda backend',
       endpointConfiguration: {
         types: [apigateway.EndpointType.REGIONAL],
       },
-    });
-
-    // Create integration with ALB
-    const integration = new apigateway.HttpIntegration(`http://${alb.loadBalancerDnsName}/{proxy}`, {
-      httpMethod: 'ANY',
-      options: {
-        requestParameters: {
-          'integration.request.path.proxy': 'method.request.path.proxy',
-        },
+      // Enable request validation but disable logging to avoid CloudWatch role ARN requirement
+      deployOptions: {
+        stageName: 'prod',
+        loggingLevel: apigateway.MethodLoggingLevel.OFF,
+        dataTraceEnabled: false,
+        metricsEnabled: true,
       },
     });
 
-    // Add proxy resource to handle all requests
+    // Create Lambda integration
+    const lambdaIntegration = new apigateway.LambdaIntegration(lambdaFunction, {
+      requestTemplates: { 'application/json': '{ "statusCode": "200" }' },
+      proxy: true, // Use Lambda proxy integration
+    });
+
+    // Add root route (/) to handle all requests
+    api.root.addMethod('ANY', lambdaIntegration);
+
+    // Add proxy resource to handle all sub-routes
     const proxyResource = api.root.addResource('{proxy+}');
-    proxyResource.addMethod('ANY', integration, {
-      requestParameters: {
-        'method.request.path.proxy': true,
-      },
-    });
+    proxyResource.addMethod('ANY', lambdaIntegration);
 
-    // Add CORS support for the API
-    proxyResource.addCorsPreflight({
+    // Add CORS support
+    const corsOptions: apigateway.CorsOptions = {
       allowOrigins: ['*'],
       allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization'],
-    });
+      allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    };
+
+    api.root.addCorsPreflight(corsOptions);
+    proxyResource.addCorsPreflight(corsOptions);
 
     // Create custom domain name for API Gateway
     const apiDomain = new apigateway.DomainName(this, 'ApiDomainName', {
@@ -247,13 +169,13 @@ export class ResumeBotBackendStack extends cdk.Stack {
       endpointType: apigateway.EndpointType.REGIONAL,
     });
 
-    // Create base path mapping to connect the custom domain to the API
+    // Create base path mapping
     new apigateway.BasePathMapping(this, 'BasePathMapping', {
       domainName: apiDomain,
       restApi: api,
     });
 
-    // Create Route53 A record pointing to the API Gateway custom domain
+    // Create Route53 A record
     new route53.ARecord(this, 'ApiAliasRecord', {
       recordName: apiDomainName,
       target: route53.RecordTarget.fromAlias(
@@ -262,17 +184,46 @@ export class ResumeBotBackendStack extends cdk.Stack {
       zone: hostedZone,
     });
 
-    // Set the API endpoint to use the custom domain (which provides HTTPS)
+    // Set the API endpoint
     this.apiEndpoint = `https://${apiDomainName}`;
 
-    // Create CloudWatch Dashboard for monitoring
+    // Create CloudWatch Dashboard
     const dashboard = new cloudwatch.Dashboard(this, 'ResumeBotDashboard', {
-      dashboardName: 'ResumeBot-Monitoring',
+      dashboardName: 'ResumeBot-Lambda-Monitoring',
     });
 
-    // Add widgets to the dashboard
+    // Add Lambda and API Gateway metrics to dashboard
     dashboard.addWidgets(
-      // API Gateway metrics
+      new cloudwatch.GraphWidget({
+        title: 'Lambda - Invocations',
+        left: [lambdaFunction.metricInvocations()],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Lambda - Duration',
+        left: [lambdaFunction.metricDuration()],
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Lambda - Errors',
+        left: [lambdaFunction.metricErrors()],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Lambda - Throttles',
+        left: [lambdaFunction.metricThrottles()],
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'API Gateway - Request Count',
         left: [api.metricCount()],
@@ -287,107 +238,32 @@ export class ResumeBotBackendStack extends cdk.Stack {
       }),
     );
 
-    dashboard.addWidgets(
-      // ECS Service metrics
-      new cloudwatch.GraphWidget({
-        title: 'ECS Service - CPU Utilization',
-        left: [service.metricCpuUtilization()],
-        width: 12,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'ECS Service - Memory Utilization',
-        left: [service.metricMemoryUtilization()],
-        width: 12,
-        height: 6,
-      }),
-    );
-
-    // Custom log-based metrics for chatbot interactions
-    const chatbotInteractionMetric = new cloudwatch.Metric({
-      namespace: 'ResumeBot/Interactions',
-      metricName: 'ChatbotQuestions',
-      dimensionsMap: {
-        'Service': 'resume-bot-backend'
-      },
-      statistic: 'Sum',
-    });
-
-    const responseTimeMetric = new cloudwatch.Metric({
-      namespace: 'ResumeBot/Performance',
-      metricName: 'ResponseTime',
-      dimensionsMap: {
-        'Service': 'resume-bot-backend'
-      },
-      statistic: 'Average',
-    });
-
-    dashboard.addWidgets(
-      new cloudwatch.GraphWidget({
-        title: 'Chatbot Interactions Count',
-        left: [chatbotInteractionMetric],
-        width: 12,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'Average Response Time',
-        left: [responseTimeMetric],
-        width: 12,
-        height: 6,
-      }),
-    );
-
-    // Create CloudWatch Log Insights queries for detailed analysis
-    const logInsightsQueries = [
-      {
-        name: 'Top Questions Asked',
-        query: `
-          fields @timestamp, question
-          | filter @message like /CHATBOT_INTERACTION/
-          | stats count() by question
-          | sort count desc
-          | limit 20
-        `
-      },
-      {
-        name: 'Response Times Over Time',
-        query: `
-          fields @timestamp, response_time_ms
-          | filter @message like /CHATBOT_INTERACTION/
-          | sort @timestamp desc
-          | limit 100
-        `
-      },
-      {
-        name: 'Error Analysis',
-        query: `
-          fields @timestamp, error, question
-          | filter success = false
-          | sort @timestamp desc
-          | limit 50
-        `
-      }
-    ];
-
     // Create CloudWatch Alarms
-    const highErrorRateAlarm = new cloudwatch.Alarm(this, 'HighErrorRateAlarm', {
-      metric: api.metricClientError(),
-      threshold: 10,
+    new cloudwatch.Alarm(this, 'HighErrorRateAlarm', {
+      metric: lambdaFunction.metricErrors(),
+      threshold: 5,
       evaluationPeriods: 2,
-      alarmDescription: 'High error rate on Resume Bot API',
+      alarmDescription: 'High error rate on Resume Bot Lambda',
     });
 
-    const highLatencyAlarm = new cloudwatch.Alarm(this, 'HighLatencyAlarm', {
+    new cloudwatch.Alarm(this, 'HighLatencyAlarm', {
       metric: api.metricLatency(),
-      threshold: 5000, // 5 seconds
+      threshold: 10000, // 10 seconds
       evaluationPeriods: 2,
       alarmDescription: 'High latency on Resume Bot API',
     });
 
+    new cloudwatch.Alarm(this, 'LambdaThrottleAlarm', {
+      metric: lambdaFunction.metricThrottles(),
+      threshold: 1,
+      evaluationPeriods: 1,
+      alarmDescription: 'Lambda function is being throttled',
+    });
+
     // Outputs
-    new cdk.CfnOutput(this, 'LoadBalancerDNS', {
-      value: alb.loadBalancerDnsName,
-      description: 'DNS name of the load balancer',
+    new cdk.CfnOutput(this, 'LambdaFunctionName', {
+      value: lambdaFunction.functionName,
+      description: 'Lambda function name',
     });
 
     new cdk.CfnOutput(this, 'APIEndpoint', {
@@ -400,9 +276,9 @@ export class ResumeBotBackendStack extends cdk.Stack {
       description: 'Custom domain name for the API',
     });
 
-    new cdk.CfnOutput(this, 'ServiceName', {
-      value: service.serviceName,
-      description: 'ECS Service name',
+    new cdk.CfnOutput(this, 'ApiGatewayUrl', {
+      value: api.url,
+      description: 'API Gateway URL (direct access)',
     });
 
     new cdk.CfnOutput(this, 'DashboardURL', {
@@ -412,8 +288,7 @@ export class ResumeBotBackendStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'LogGroupName', {
       value: logGroup.logGroupName,
-      description: 'CloudWatch Log Group for application logs',
+      description: 'CloudWatch Log Group for Lambda logs',
     });
-
   }
 }
