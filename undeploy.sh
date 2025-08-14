@@ -30,6 +30,9 @@ if [ ! -f "package.json" ]; then
     exit 1
 fi
 
+# Set dummy ECR image URI for stack destruction (required for CDK stack instantiation)
+export RESUME_BOT_ECR_IMAGE_URI="123456789012.dkr.ecr.ca-central-1.amazonaws.com/resume-bot/backend-lambda:dummy-for-destroy"
+
 # Build CDK TypeScript (needed for destroy)
 print_status "Building CDK TypeScript..."
 npm run build

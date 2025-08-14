@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -76,10 +77,40 @@ export class ResumeBotBackendStack extends cdk.Stack {
     });
 
     // Create Lambda function using Docker container
+    // Option 1: Use ECR image URI (recommended for production)
+    // Set RESUME_BOT_ECR_IMAGE_URI environment variable to use ECR image
+    // Example: 123456789012.dkr.ecr.ca-central-1.amazonaws.com/resume-bot/backend-lambda:backend-20240814-161523-a1b2c3d4
+    const ecrImageUri = process.env.RESUME_BOT_ECR_IMAGE_URI;
+    
+    if (!ecrImageUri) {
+      throw new Error('RESUME_BOT_ECR_IMAGE_URI environment variable is required. Please build and push an image to ECR first.');
+    }
+
+    // Use ECR image with timestamp-based tag
+    console.log(`Using ECR image: ${ecrImageUri}`);
+    
+    // Parse ECR URI to get repository and tag
+    // Expected format: 123456789012.dkr.ecr.ca-central-1.amazonaws.com/resume-bot/backend-lambda:backend-20240814-161523-a1b2c3d4
+    console.log(`Parsing ECR URI: ${ecrImageUri}`);
+    
+    // Split on last ':' to handle registry URLs correctly
+    const lastColonIndex = ecrImageUri.lastIndexOf(':');
+    const registryAndRepo = ecrImageUri.substring(0, lastColonIndex);
+    const tag = ecrImageUri.substring(lastColonIndex + 1);
+    const repoName = registryAndRepo.split('/').slice(1).join('/'); // Extract "resume-bot/backend-lambda"
+    
+    console.log(`Extracted repository name: ${repoName}`);
+    console.log(`Extracted tag: ${tag}`);
+    
+    // Reference the existing ECR repository
+    const ecrRepo = ecr.Repository.fromRepositoryName(this, 'ResumeBotEcrRepo', repoName);
+    
+    const lambdaCode = lambda.DockerImageCode.fromEcr(ecrRepo, {
+      tagOrDigest: tag || 'latest',
+    });
+
     const lambdaFunction = new lambda.DockerImageFunction(this, 'ResumeBotLambdaFunction', {
-      code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '../../resume-bot-backend'), {
-        file: 'Dockerfile.lambda',
-      }),
+      code: lambdaCode,
       functionName: 'resume-bot-backend',
       timeout: cdk.Duration.minutes(15), // Max timeout for Lambda
       memorySize: 3008, // Max memory for better performance with large dependencies
@@ -92,6 +123,9 @@ export class ResumeBotBackendStack extends cdk.Stack {
         LANGCHAIN_PROJECT: envVars.LANGCHAIN_PROJECT || 'Medium Analyzer',
         // Lambda-specific environment variables
         PYTHONPATH: '/var/task/src',
+        // Add build info for debugging
+        BUILD_MODE: 'ECR',
+        ECR_IMAGE_URI: ecrImageUri,
       },
     });
 

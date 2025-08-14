@@ -5,6 +5,38 @@ set -e
 
 echo "🚀 Starting Resume Bot Full Stack Deployment..."
 
+# Usage information
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --skip-build  Skip building and pushing to ECR (use existing image)"
+    echo "  --help, -h    Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0            # Build, push to ECR, and deploy (recommended)"
+    echo "  $0 --skip-build # Use existing ECR image and deploy"
+    echo ""
+    echo "Environment variables:"
+    echo "  SKIP_ECR_BUILD=true  # Alternative to --skip-build flag"
+    echo "  CDK_DEFAULT_REGION   # AWS region (default: ca-central-1)"
+    exit 0
+fi
+
+# Parse command line arguments
+if [ "$1" = "--skip-build" ]; then
+    export SKIP_ECR_BUILD=true
+    echo "⏭️  Skipping ECR build, using existing image"
+else
+    # Default to building and pushing to ECR
+    SKIP_ECR_BUILD=${SKIP_ECR_BUILD:-false}
+    if [ "$SKIP_ECR_BUILD" = "true" ]; then
+        echo "⏭️  Skipping ECR build (from environment variable)"
+    else
+        echo "📦 Building and pushing to ECR (default)"
+    fi
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -58,13 +90,66 @@ fi
 print_status "Building CDK TypeScript..."
 npm run build
 
-# Bootstrap CDK if needed (this is safe to run multiple times)
-print_status "Bootstrapping CDK (if needed)..."
-npx cdk bootstrap
+# Get AWS account ID and default region
+CDK_ACCOUNT=${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}
+CDK_REGION=${CDK_DEFAULT_REGION:-$(aws configure get region || echo "ca-central-1")}
 
-# Bootstrap us-east-1 for certificate stack
-print_status "Bootstrapping us-east-1 for certificate stack..."
-npx cdk bootstrap aws://${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}/us-east-1
+# Export environment variables for CDK
+export CDK_DEFAULT_ACCOUNT=$CDK_ACCOUNT
+export CDK_DEFAULT_REGION=$CDK_REGION
+
+print_status "Using AWS Account: $CDK_ACCOUNT"
+print_status "Using Default Region: $CDK_REGION"
+
+# Build and push Docker image to ECR FIRST (if not skipped)
+if [ "$SKIP_ECR_BUILD" != "true" ]; then
+    print_status "Building and pushing Docker image to ECR..."
+    cd ../resume-bot-backend
+    
+    # Run the build and push script
+    if [ -f "scripts/build-and-push.sh" ]; then
+        ./scripts/build-and-push.sh
+    else
+        print_error "Build script not found at scripts/build-and-push.sh"
+        exit 1
+    fi
+    
+    cd ../resume-bot-deploy
+else
+    print_status "Skipping ECR build, using existing image..."
+fi
+
+# NOW get the latest ECR image URI (after potentially building new one)
+print_status "Getting latest timestamped ECR image URI (excluding 'latest' tag)..."
+# First get all tags from the most recent image, then filter out 'latest' in bash
+ALL_TAGS=$(aws ecr describe-images \
+    --repository-name resume-bot/backend-lambda \
+    --region $CDK_REGION \
+    --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+    --output text)
+
+# Filter out 'latest' tag and get the first remaining tag
+LATEST_TAG=""
+for tag in $ALL_TAGS; do
+    if [[ "$tag" != "latest" ]]; then
+        LATEST_TAG="$tag"
+        break
+    fi
+done
+
+if [ "$LATEST_TAG" != "None" ] && [ ! -z "$LATEST_TAG" ]; then
+    ECR_IMAGE_URI="${CDK_ACCOUNT}.dkr.ecr.${CDK_REGION}.amazonaws.com/resume-bot/backend-lambda:${LATEST_TAG}"
+    export RESUME_BOT_ECR_IMAGE_URI=$ECR_IMAGE_URI
+    print_status "Using ECR image: $ECR_IMAGE_URI"
+else
+    print_error "No images found in ECR repository. Please run the build script first."
+    print_warning "Run: cd ../resume-bot-backend && ./scripts/build-and-push.sh"
+    exit 1
+fi
+
+# Note: CDK bootstrap is NOT needed for ECR-based deployment
+# Bootstrap is only required for CDK assets (which we're not using)
+print_status "Skipping CDK bootstrap (not needed for ECR deployment)"
 
 # Deploy the certificate stack first (must be in us-east-1 for CloudFront)
 print_status "Deploying certificate stack to us-east-1..."
@@ -83,7 +168,18 @@ print_status "Certificate ARN: $CERT_ARN"
 
 # Deploy the backend stack (Lambda-based)
 print_status "Deploying Lambda backend stack..."
-print_status "Building Docker image for Lambda..."
+
+# ECR build and image URI setup already completed above
+print_status "Ready to deploy with ECR image: $RESUME_BOT_ECR_IMAGE_URI"
+
+print_status "Deploying backend stack..."
+print_status "Current environment variables:"
+print_status "  CDK_DEFAULT_ACCOUNT: $CDK_DEFAULT_ACCOUNT"
+print_status "  CDK_DEFAULT_REGION: $CDK_DEFAULT_REGION"
+print_status "  RESUME_BOT_ECR_IMAGE_URI: ${RESUME_BOT_ECR_IMAGE_URI:-'NOT SET'}"
+
+# Show what CDK will see
+print_status "Running CDK deployment..."
 npx cdk deploy ResumeBotBackendStack --require-approval never
 
 # Construct the backend API URL using the static pattern
