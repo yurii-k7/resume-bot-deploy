@@ -3,6 +3,9 @@
 # Resume Bot Undeploy Script
 set -e
 
+# Change to the directory where this script is located
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
 echo "🗑️  Destroying Resume Bot stacks..."
 
 # Colors for output

@@ -5,9 +5,15 @@
 
 set -e
 
+# Change to the directory where this script is located
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
 # Configuration
 USER_NAME="resume-bot-deploy-user"
 POLICY_NAME="ResumeBotDeploymentPolicy"
+
+# Global variables to be set by check_prerequisites
+AWS_ACCOUNT_ID=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -55,8 +61,9 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Get AWS account ID
+    # Get AWS account ID and make it globally available
     AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    export AWS_ACCOUNT_ID
     print_info "AWS Account ID: ${AWS_ACCOUNT_ID}"
     print_success "Prerequisites check passed"
     echo

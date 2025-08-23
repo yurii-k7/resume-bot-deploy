@@ -3,6 +3,9 @@
 # Resume Bot Full Stack Deployment Script
 set -e
 
+# Change to the directory where this script is located
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
 echo "🚀 Starting Resume Bot Full Stack Deployment..."
 
 # Usage information
@@ -10,32 +13,18 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --skip-build  Skip building and pushing to ECR (use existing image)"
     echo "  --help, -h    Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0            # Build, push to ECR, and deploy (recommended)"
-    echo "  $0 --skip-build # Use existing ECR image and deploy"
+    echo "  $0            # Build, push to ECR, and deploy"
     echo ""
     echo "Environment variables:"
-    echo "  SKIP_ECR_BUILD=true  # Alternative to --skip-build flag"
     echo "  CDK_DEFAULT_REGION   # AWS region (default: ca-central-1)"
     exit 0
 fi
 
-# Parse command line arguments
-if [ "$1" = "--skip-build" ]; then
-    export SKIP_ECR_BUILD=true
-    echo "⏭️  Skipping ECR build, using existing image"
-else
-    # Default to building and pushing to ECR
-    SKIP_ECR_BUILD=${SKIP_ECR_BUILD:-false}
-    if [ "$SKIP_ECR_BUILD" = "true" ]; then
-        echo "⏭️  Skipping ECR build (from environment variable)"
-    else
-        echo "📦 Building and pushing to ECR (default)"
-    fi
-fi
+# Always build and push to ECR
+echo "📦 Building and pushing to ECR"
 
 # Colors for output
 RED='\033[0;31m'
@@ -101,23 +90,11 @@ export CDK_DEFAULT_REGION=$CDK_REGION
 print_status "Using AWS Account: $CDK_ACCOUNT"
 print_status "Using Default Region: $CDK_REGION"
 
-# Build and push Docker image to ECR FIRST (if not skipped)
-if [ "$SKIP_ECR_BUILD" != "true" ]; then
-    print_status "Building and pushing Docker image to ECR..."
-    cd ../resume-bot-backend
-    
-    # Run the build and push script
-    if [ -f "scripts/build-and-push.sh" ]; then
-        ./scripts/build-and-push.sh
-    else
-        print_error "Build script not found at scripts/build-and-push.sh"
-        exit 1
-    fi
-    
-    cd ../resume-bot-deploy
-else
-    print_status "Skipping ECR build, using existing image..."
-fi
+# Build and push Docker image to ECR using backend script
+print_status "Building and pushing Docker image to ECR..."
+
+# Run the backend build and push script
+../resume-bot-backend/scripts/build-and-push.sh
 
 # NOW get the latest ECR image URI (after potentially building new one)
 print_status "Getting latest timestamped ECR image URI (excluding 'latest' tag)..."
@@ -193,21 +170,14 @@ fi
 API_URL="https://api.resume.$DOMAIN_NAME"
 print_status "Backend API URL: $API_URL"
 
-# Build the frontend with the correct API URL
+# Build the frontend with the correct API URL using the build script
 print_status "Building the frontend with backend API URL..."
-cd ../resume-bot-frontend
 
-# Check if frontend dependencies are installed
-if [ ! -d "node_modules" ]; then
-    print_status "Installing frontend dependencies..."
-    npm install
-fi
-
-# Build the frontend with the API URL
-VITE_API_URL=$API_URL npm run build
+# Use the frontend build script with the API URL
+VITE_API_URL=$API_URL ../resume-bot-frontend/scripts/build.sh
 
 # Check if build was successful
-if [ ! -d "dist" ]; then
+if [ ! -d "../resume-bot-frontend/dist" ]; then
     print_error "Frontend build failed - dist directory not found"
     exit 1
 fi

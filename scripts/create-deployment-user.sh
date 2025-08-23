@@ -6,12 +6,16 @@
 
 set -e
 
+# Change to the directory where this script is located
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
 # Configuration
 USER_NAME="resume-bot-deploy-user"
 POLICY_NAME="ResumeBotDeploymentPolicy"
 AWS_REGION=${AWS_REGION:-"ca-central-1"}
 ECR_REPOSITORY="resume-bot/backend-lambda"
 LAMBDA_FUNCTION_NAME="resume-bot-backend"
+S3_FRONTEND_BUCKET=""  # Will be set dynamically from CloudFormation stack
 
 # Colors for output
 RED='\033[0;31m'
@@ -70,6 +74,24 @@ check_prerequisites() {
     AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
     print_info "AWS Account ID: ${AWS_ACCOUNT_ID}"
     print_info "AWS Region: ${AWS_REGION}"
+    
+    # Get S3 frontend bucket name from CloudFormation stack
+    print_info "Getting S3 frontend bucket name from CloudFormation..."
+    S3_FRONTEND_BUCKET=$(aws cloudformation describe-stacks \
+        --stack-name ResumeBotFrontendStack \
+        --region ${AWS_REGION} \
+        --query 'Stacks[0].Outputs[?OutputKey==`S3BucketName`].OutputValue' \
+        --output text 2>/dev/null || echo "")
+    
+    if [ -z "$S3_FRONTEND_BUCKET" ]; then
+        print_warning "Could not get S3 bucket name from ResumeBotFrontendStack"
+        print_warning "The deployment user will be created without S3 permissions"
+        print_warning "Deploy the frontend stack first, then recreate the deployment user"
+        S3_FRONTEND_BUCKET="BUCKET_NOT_FOUND"
+    else
+        print_info "S3 Frontend Bucket: ${S3_FRONTEND_BUCKET}"
+    fi
+    
     print_success "Prerequisites check passed"
     echo
 }
@@ -79,6 +101,29 @@ create_iam_policy() {
     print_info "Creating IAM policy with minimal permissions..."
     
     # Create policy document
+    # Build S3 policy section conditionally
+    if [ "$S3_FRONTEND_BUCKET" != "BUCKET_NOT_FOUND" ] && [ ! -z "$S3_FRONTEND_BUCKET" ]; then
+        S3_POLICY_SECTION="{
+            \"Sid\": \"S3FrontendDeployment\",
+            \"Effect\": \"Allow\",
+            \"Action\": [
+                \"s3:GetObject\",
+                \"s3:PutObject\",
+                \"s3:DeleteObject\",
+                \"s3:ListBucket\",
+                \"s3:GetBucketLocation\",
+                \"s3:PutObjectAcl\"
+            ],
+            \"Resource\": [
+                \"arn:aws:s3:::${S3_FRONTEND_BUCKET}\",
+                \"arn:aws:s3:::${S3_FRONTEND_BUCKET}/*\"
+            ]
+        },"
+    else
+        S3_POLICY_SECTION=""
+        print_warning "Skipping S3 frontend permissions (bucket name not found)"
+    fi
+
     POLICY_DOCUMENT=$(cat <<EOF
 {
     "Version": "2012-10-17",
@@ -118,6 +163,7 @@ create_iam_policy() {
             ],
             "Resource": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_FUNCTION_NAME}"
         },
+        ${S3_POLICY_SECTION}
         {
             "Sid": "STSGetCallerIdentity",
             "Effect": "Allow",
@@ -147,7 +193,7 @@ EOF
         aws iam create-policy \
             --policy-name "${POLICY_NAME}" \
             --policy-document "$POLICY_DOCUMENT" \
-            --description "Minimal permissions for Resume Bot CI/CD deployment - ECR and Lambda only" > /dev/null
+            --description "Minimal permissions for Resume Bot CI/CD deployment - ECR, Lambda, and S3 frontend" > /dev/null
             
         print_success "Policy created successfully"
     fi
@@ -248,9 +294,10 @@ display_results() {
     print_info "🔒 Security Information:"
     echo "   • User: ${USER_NAME}"
     echo "   • Policy: ${POLICY_NAME}"
-    echo "   • Permissions: ECR + Lambda update only"
+    echo "   • Permissions: ECR + Lambda + S3 frontend"
     echo "   • ECR Repository: ${ECR_REPOSITORY}"
     echo "   • Lambda Function: ${LAMBDA_FUNCTION_NAME}"
+    echo "   • S3 Frontend Bucket: ${S3_FRONTEND_BUCKET}"
     echo
     
     print_info "📝 GitHub Secrets Setup:"
