@@ -83,6 +83,14 @@ check_prerequisites() {
         --query 'Stacks[0].Outputs[?OutputKey==`S3BucketName`].OutputValue' \
         --output text 2>/dev/null || echo "")
     
+    # Get CloudFront distribution ID from CloudFormation stack
+    print_info "Getting CloudFront distribution ID from CloudFormation..."
+    CLOUDFRONT_DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+        --stack-name ResumeBotFrontendStack \
+        --region ${AWS_REGION} \
+        --query 'Stacks[0].Outputs[?OutputKey==`DistributionId`].OutputValue' \
+        --output text 2>/dev/null || echo "")
+    
     if [ -z "$S3_FRONTEND_BUCKET" ]; then
         print_warning "Could not get S3 bucket name from ResumeBotFrontendStack"
         print_warning "The deployment user will be created without S3 permissions"
@@ -90,6 +98,14 @@ check_prerequisites() {
         S3_FRONTEND_BUCKET="BUCKET_NOT_FOUND"
     else
         print_info "S3 Frontend Bucket: ${S3_FRONTEND_BUCKET}"
+    fi
+    
+    if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+        print_warning "Could not get CloudFront distribution ID from ResumeBotFrontendStack"
+        print_warning "The deployment user will be created without CloudFront permissions"
+        CLOUDFRONT_DISTRIBUTION_ID="DISTRIBUTION_NOT_FOUND"
+    else
+        print_info "CloudFront Distribution ID: ${CLOUDFRONT_DISTRIBUTION_ID}"
     fi
     
     print_success "Prerequisites check passed"
@@ -122,6 +138,23 @@ create_iam_policy() {
     else
         S3_POLICY_SECTION=""
         print_warning "Skipping S3 frontend permissions (bucket name not found)"
+    fi
+
+    # Build CloudFront policy section conditionally
+    if [ "$CLOUDFRONT_DISTRIBUTION_ID" != "DISTRIBUTION_NOT_FOUND" ] && [ ! -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+        CLOUDFRONT_POLICY_SECTION="{
+            \"Sid\": \"CloudFrontInvalidation\",
+            \"Effect\": \"Allow\",
+            \"Action\": [
+                \"cloudfront:CreateInvalidation\",
+                \"cloudfront:GetInvalidation\",
+                \"cloudfront:ListInvalidations\"
+            ],
+            \"Resource\": \"arn:aws:cloudfront::${AWS_ACCOUNT_ID}:distribution/${CLOUDFRONT_DISTRIBUTION_ID}\"
+        },"
+    else
+        CLOUDFRONT_POLICY_SECTION=""
+        print_warning "Skipping CloudFront permissions (distribution ID not found)"
     fi
 
     POLICY_DOCUMENT=$(cat <<EOF
@@ -163,7 +196,19 @@ create_iam_policy() {
             ],
             "Resource": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_FUNCTION_NAME}"
         },
+        {
+            "Sid": "CloudFormationReadAccess",
+            "Effect": "Allow",
+            "Action": [
+                "cloudformation:DescribeStacks"
+            ],
+            "Resource": [
+                "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/ResumeBotFrontendStack/*",
+                "arn:aws:cloudformation:${AWS_REGION}:${AWS_ACCOUNT_ID}:stack/ResumeBotBackendStack/*"
+            ]
+        },
         ${S3_POLICY_SECTION}
+        ${CLOUDFRONT_POLICY_SECTION}
         {
             "Sid": "STSGetCallerIdentity",
             "Effect": "Allow",
@@ -193,7 +238,7 @@ EOF
         aws iam create-policy \
             --policy-name "${POLICY_NAME}" \
             --policy-document "$POLICY_DOCUMENT" \
-            --description "Minimal permissions for Resume Bot CI/CD deployment - ECR, Lambda, and S3 frontend" > /dev/null
+            --description "Minimal permissions for Resume Bot CI/CD deployment - ECR, Lambda, S3 frontend, and CloudFront" > /dev/null
             
         print_success "Policy created successfully"
     fi
@@ -294,10 +339,11 @@ display_results() {
     print_info "🔒 Security Information:"
     echo "   • User: ${USER_NAME}"
     echo "   • Policy: ${POLICY_NAME}"
-    echo "   • Permissions: ECR + Lambda + S3 frontend"
+    echo "   • Permissions: ECR + Lambda + S3 frontend + CloudFront"
     echo "   • ECR Repository: ${ECR_REPOSITORY}"
     echo "   • Lambda Function: ${LAMBDA_FUNCTION_NAME}"
     echo "   • S3 Frontend Bucket: ${S3_FRONTEND_BUCKET}"
+    echo "   • CloudFront Distribution: ${CLOUDFRONT_DISTRIBUTION_ID}"
     echo
     
     print_info "📝 GitHub Secrets Setup:"
